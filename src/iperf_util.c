@@ -224,16 +224,17 @@ cpu_util(double pcpu[3])
 }
 
 const char *
-get_system_info(void)
+get_system_info(char *buf, size_t bufsiz)
 {
-    static char buf[1024];
     struct utsname  uts;
 
-    memset(buf, 0, 1024);
-    uname(&uts);
+    if (buf) {
+        memset(buf, 0, bufsiz);
+        uname(&uts);
 
-    snprintf(buf, sizeof(buf), "%s %s %s %s %s", uts.sysname, uts.nodename,
+        snprintf(buf, bufsiz, "%s %s %s %s %s", uts.sysname, uts.nodename,
 	     uts.release, uts.version, uts.machine);
+    }
 
     return buf;
 }

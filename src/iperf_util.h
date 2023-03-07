@@ -48,7 +48,7 @@ double timeval_diff(struct timeval *tv0, struct timeval *tv1);
 
 void cpu_util(double pcpu[3]);
 
-const char* get_system_info(void);
+const char* get_system_info(char *buf, size_t bufsiz);
 
 const char* get_optional_features(void);
 

@@ -451,6 +451,7 @@ iperf_run_server(struct iperf_test *test)
     int64_t t_usecs;
     int64_t timeout_us;
     int64_t rcv_timeout_us;
+    char buf[1024];
 
     if (test->logfile)
         if (iperf_open_logfile(test) < 0)
@@ -470,11 +471,11 @@ iperf_run_server(struct iperf_test *test)
 
     if (test->json_output) {
 	cJSON_AddItemToObject(test->json_start, "version", cJSON_CreateString(version));
-	cJSON_AddItemToObject(test->json_start, "system_info", cJSON_CreateString(get_system_info()));
+	cJSON_AddItemToObject(test->json_start, "system_info", cJSON_CreateString(get_system_info(buf, sizeof(buf))));
     } else if (test->verbose) {
 	iperf_printf(test, "%s\n", version);
 	iperf_printf(test, "%s", "");
-	iperf_printf(test, "%s\n", get_system_info());
+	iperf_printf(test, "%s\n", get_system_info(buf, sizeof(buf)));
 	iflush(test);
     }
 

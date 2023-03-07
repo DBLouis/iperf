@@ -1121,6 +1121,7 @@ iperf_parse_arguments(struct iperf_test *test, int argc, char **argv)
     struct xbind_entry *xbe;
     double farg;
     int rcv_timeout_in = 0;
+    char buf[1024];
 
     blksize = 0;
     server_flag = client_flag = rate_flag = duration_flag = rcv_timeout_flag = snd_timeout_flag =0;
@@ -1183,7 +1184,7 @@ iperf_parse_arguments(struct iperf_test *test, int argc, char **argv)
                 test->json_output = 1;
                 break;
             case 'v':
-                printf("%s (cJSON %s)\n%s\n%s\n", version, cJSON_Version(), get_system_info(),
+                printf("%s (cJSON %s)\n%s\n%s\n", version, cJSON_Version(), get_system_info(buf, sizeof(buf)),
 		       get_optional_features());
                 exit(0);
             case 's':
