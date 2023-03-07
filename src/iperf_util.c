@@ -57,7 +57,7 @@
  */
 int readentropy(void *out, size_t outsize)
 {
-    static FILE *frandom;
+    static thread_local FILE *frandom;
     static const char rndfile[] = "/dev/urandom";
 
     if (!outsize) return 0;
