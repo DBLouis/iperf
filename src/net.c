@@ -156,7 +156,7 @@ create_socket(int domain, int proto, const char *local, const char *bind_dev, in
     if (bind_dev) {
 #if defined(HAVE_SO_BINDTODEVICE)
         if (setsockopt(s, SOL_SOCKET, SO_BINDTODEVICE,
-                       bind_dev, IFNAMSIZ) < 0)
+                       bind_dev, strnlen(bind_dev, IFNAMSIZ)) < 0)
 #endif // HAVE_SO_BINDTODEVICE
         {
             saved_errno = errno;
@@ -295,7 +295,7 @@ netannounce(int domain, int proto, const char *local, const char *bind_dev, int 
     if (bind_dev) {
 #if defined(HAVE_SO_BINDTODEVICE)
         if (setsockopt(s, SOL_SOCKET, SO_BINDTODEVICE,
-                       bind_dev, IFNAMSIZ) < 0)
+                       bind_dev, strnlen(bind_dev, IFNAMSIZ)) < 0)
 #endif // HAVE_SO_BINDTODEVICE
         {
             saved_errno = errno;

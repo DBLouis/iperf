@@ -218,6 +218,27 @@ AC_CHECK_FUNCS([sendfile])
 # connections.
 AC_CHECK_FUNCS([getline])
 
+# Check for availability of sendmmsg/recvmmsg functions.
+AC_CHECK_FUNCS([sendmmsg],
+	       AC_DEFINE([HAVE_SENDMMSG], [1], [Have sendmmsg function.]))
+
+AC_CHECK_FUNCS([recvmmsg],
+	       AC_DEFINE([HAVE_RECVMMSG], [1], [Have recvmmsg function.]))
+
+AC_ARG_ENABLE([batch_send],
+           AS_HELP_STRING([--enable-batch-send], [Enable batch send @<:@default=no@:>@]),
+           [AS_CASE(${enableval}, [yes], [], [no], [],
+           [AC_MSG_ERROR([bad value ${enableval} for --enable-batch-send])])],
+           [enable_batch_send=no])
+AS_IF([test x$enable_batch_send = xyes], [AC_DEFINE(ENABLE_BATCH_SEND, [1], [Batch send enabled])])
+
+AC_ARG_ENABLE([batch_recv],
+           AS_HELP_STRING([--enable-batch-recv], [Enable batch recv @<:@default=no@:>@]),
+           [AS_CASE(${enableval}, [yes], [], [no], [],
+           [AC_MSG_ERROR([bad value ${enableval} for --enable-batch-recv])])],
+           [enable_batch_recv=no])
+AS_IF([test x$enable_batch_recv = xyes], [AC_DEFINE(ENABLE_BATCH_RECV, [1], [Batch recv enabled])])
+
 # Check for packet pacing socket option (Linux only for now).
 AC_CACHE_CHECK([SO_MAX_PACING_RATE socket option],
 [iperf3_cv_header_so_max_pacing_rate],

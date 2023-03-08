@@ -194,6 +194,11 @@ const char usage_longstr[] = "Usage: iperf3 [-s|-c host] [options]\n"
                            "  -L, --flowlabel N         set the IPv6 flow label (only supported on Linux)\n"
 #endif /* HAVE_FLOWLABEL */
                            "  -Z, --zerocopy            use a 'zero copy' method of sending data\n"
+#if defined(ENABLE_BATCH_SEND) || defined(ENABLE_BATCH_RECV)
+                           "                            If using UDP, send and/or receive messages in batch using sendmmsg/recvmmsg;\n"
+                           "                            (not supported when reading from a file).\n"
+                           "                            The batch size is set by the burst mode packet count.\n"
+#endif /* ENABLE_BATCH_SEND || ENABLE_BATCH_RECV */
                            "  -O, --omit N              perform pre-test for N seconds and omit the pre-test statistics\n"
                            "  -T, --title str           prefix every output line with this string\n"
                            "  --extra-data str          data string to include in client and server JSON\n"

@@ -43,6 +43,7 @@
 #include <fcntl.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <sys/uio.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -102,6 +103,7 @@ static int diskfile_recv(struct iperf_stream *sp);
 static int JSON_write(int fd, cJSON *json);
 static void print_interval_results(struct iperf_test *test, struct iperf_stream *sp, cJSON *json_interval_streams);
 static cJSON *JSON_read(int fd);
+static void init_batch_mode(struct iperf_test *test);
 
 
 /*************************** Print usage functions ****************************/
@@ -1752,6 +1754,8 @@ iperf_parse_arguments(struct iperf_test *test, int argc, char **argv)
 	    1 : round(test->settings->bitrate_limit_interval/test->stats_interval) );
     }
 
+    init_batch_mode(test);
+
     /* Show warning if JSON output is used with explicit report format */
     if ((test->json_output) && (test->settings->unit_format != 'a')) {
         warning("Report format (-f) flag ignored with JSON output (-J)");
@@ -2063,6 +2067,8 @@ iperf_exchange_parameters(struct iperf_test *test)
 
         if (get_parameters(test) < 0)
             return -1;
+
+        init_batch_mode(test);
 
 #if defined(HAVE_SSL)
         if (test_is_authorized(test) < 0){
@@ -2812,6 +2818,7 @@ iperf_defaults(struct iperf_test *testp)
 
     testp->stats_interval = testp->reporter_interval = 1;
     testp->num_streams = 1;
+    testp->stream_bufsize = DEFAULT_TCP_BLKSIZE;
 
     testp->settings->domain = AF_UNSPEC;
     testp->settings->unit_format = 'a';
@@ -2832,6 +2839,8 @@ iperf_defaults(struct iperf_test *testp)
     testp->settings->rcv_timeout.usecs = (DEFAULT_NO_MSG_RCVD_TIMEOUT % SEC_TO_mS) * mS_TO_US;
     testp->zerocopy = 0;
 
+    testp->zerocopy = 0;
+    testp->settings->batch = 0;
     memset(testp->cookie, 0, COOKIE_SIZE);
 
     testp->multisend = 10;	/* arbitrary */
@@ -3111,6 +3120,7 @@ iperf_reset_test(struct iperf_test *test)
     FD_ZERO(&test->write_set);
 
     test->num_streams = 1;
+    test->stream_bufsize = DEFAULT_TCP_BLKSIZE;
     test->settings->socket_bufsize = 0;
     test->settings->blksize = DEFAULT_TCP_BLKSIZE;
     test->settings->rate = 0;
@@ -3119,6 +3129,7 @@ iperf_reset_test(struct iperf_test *test)
     test->settings->tos = 0;
     test->settings->dont_fragment = 0;
     test->zerocopy = 0;
+    test->settings->batch = 0;
 
 #if defined(HAVE_SSL)
     if (test->settings->authtoken) {
@@ -3180,6 +3191,10 @@ iperf_reset_stats(struct iperf_test *test)
         sp->omitted_cnt_error = sp->cnt_error;
         sp->omitted_outoforder_packets = sp->outoforder_packets;
 	sp->jitter = 0;
+#if defined(ENABLE_BATCH_SEND) || defined(ENABLE_BATCH_RECV)
+        sp->batch_packet_count = 0;
+        sp->pbuf = sp->buffer;
+#endif
 	rp = sp->result;
         rp->bytes_sent_omit = rp->bytes_sent;
         rp->bytes_received = 0;
@@ -4190,7 +4205,7 @@ iperf_free_stream(struct iperf_stream *sp)
     struct iperf_interval_results *irp, *nirp;
 
     /* XXX: need to free interval list too! */
-    munmap(sp->buffer, sp->test->settings->blksize);
+    munmap(sp->buffer, sp->test->stream_bufsize);
     close(sp->buffer_fd);
     if (sp->diskfile_fd >= 0)
 	close(sp->diskfile_fd);
@@ -4201,6 +4216,12 @@ iperf_free_stream(struct iperf_stream *sp)
     free(sp->result);
     if (sp->send_timer != NULL)
 	tmr_cancel(sp->send_timer);
+#if defined(ENABLE_BATCH_SEND) || defined(ENABLE_BATCH_RECV)
+    if (sp->mmsg_iov != NULL)
+        free(sp->mmsg_iov);
+    if (sp->mmsg != NULL)
+        free(sp->mmsg);
+#endif
     free(sp);
 }
 
@@ -4210,6 +4231,11 @@ iperf_new_stream(struct iperf_test *test, int s, int sender)
 {
     struct iperf_stream *sp;
     int ret = 0;
+#if defined(ENABLE_BATCH_SEND) || defined(ENABLE_BATCH_RECV)
+    int burst;
+    int i;
+    char *pbuf;
+#endif
 
     char template[1024];
     if (test->tmp_template) {
@@ -4264,19 +4290,54 @@ iperf_new_stream(struct iperf_test *test, int s, int sender)
         free(sp);
         return NULL;
     }
-    if (ftruncate(sp->buffer_fd, test->settings->blksize) < 0) {
+    if (ftruncate(sp->buffer_fd, sp->test->stream_bufsize) < 0) {
         i_errno = IECREATESTREAM;
         free(sp->result);
         free(sp);
         return NULL;
     }
-    sp->buffer = (char *) mmap(NULL, test->settings->blksize, PROT_READ|PROT_WRITE, MAP_PRIVATE, sp->buffer_fd, 0);
+    sp->buffer = (char *) mmap(NULL, sp->test->stream_bufsize, PROT_READ|PROT_WRITE, MAP_PRIVATE, sp->buffer_fd, 0);
     if (sp->buffer == MAP_FAILED) {
         i_errno = IECREATESTREAM;
         free(sp->result);
         free(sp);
         return NULL;
+    } else if (sp->test->debug_level >= DEBUG_LEVEL_DEBUG)
+        printf("Successfully allocated stream buffer at addr %p with length %d\n", sp->buffer, sp->test->stream_bufsize);
+
+    sp->pending_size = 0;
+
+#if defined(ENABLE_BATCH_SEND) || defined(ENABLE_BATCH_RECV)
+    if (test->protocol->id == Pudp) {
+        burst = (sp->settings->batch == 0) ? 1 : sp->settings->burst;
+        sp->mmsg = malloc(burst * sizeof(*sp->mmsg));
+        if (sp->mmsg == NULL) {
+            i_errno = IECREATESTREAM;
+            iperf_free_stream(sp);
+            return NULL;
+        }
+        memset(sp->mmsg, 0, burst * sizeof(*sp->mmsg));
+
+        sp->mmsg_iov = malloc(burst * sizeof(struct iovec));
+        if (sp->mmsg_iov == NULL) {
+            i_errno = IECREATESTREAM;
+            iperf_free_stream(sp);
+            return NULL;
+        }
+        memset(sp->mmsg_iov, 0, burst * sizeof(struct iovec));
+
+        for (i = 0, pbuf = sp->buffer; i < burst; i++, pbuf += sp->settings->blksize) {
+            sp->mmsg[i].msg_hdr.msg_iov = &sp->mmsg_iov[i];
+            sp->mmsg[i].msg_hdr.msg_iov->iov_base = pbuf;
+            sp->mmsg[i].msg_hdr.msg_iov->iov_len = sp->settings->blksize;
+            sp->mmsg[i].msg_hdr.msg_iovlen = 1;
+        }
     }
+
+    sp->batch_packet_count = 0;
+    sp->pbuf = sp->buffer;
+#endif // ENABLE_BATCH_SEND || ENABLE_BATCH_RECV
+
     sp->pending_size = 0;
 
     /* Set socket */
@@ -4289,7 +4350,7 @@ iperf_new_stream(struct iperf_test *test, int s, int sender)
 	sp->diskfile_fd = open(test->diskfile_name, sender ? O_RDONLY : (O_WRONLY|O_CREAT|O_TRUNC), S_IRUSR|S_IWUSR);
 	if (sp->diskfile_fd == -1) {
 	    i_errno = IEFILE;
-            munmap(sp->buffer, sp->test->settings->blksize);
+            munmap(sp->buffer, sp->test->stream_bufsize);
             free(sp->result);
             free(sp);
 	    return NULL;
@@ -4303,13 +4364,13 @@ iperf_new_stream(struct iperf_test *test, int s, int sender)
 
     /* Initialize stream */
     if (test->repeating_payload)
-        fill_with_repeating_pattern(sp->buffer, test->settings->blksize);
+        fill_with_repeating_pattern(sp->buffer, test->stream_bufsize);
     else
-        ret = readentropy(sp->buffer, test->settings->blksize);
+        ret = readentropy(sp->buffer, test->stream_bufsize);
 
     if ((ret < 0) || (iperf_init_stream(sp, test) < 0)) {
         close(sp->buffer_fd);
-        munmap(sp->buffer, sp->test->settings->blksize);
+        munmap(sp->buffer, sp->test->stream_bufsize);
         free(sp->result);
         free(sp);
         return NULL;
@@ -4459,7 +4520,7 @@ diskfile_send(struct iperf_stream *sp)
 
     /* if needed, read enough data from the disk to fill up the buffer */
     if (sp->diskfile_left < sp->test->settings->blksize && !sp->test->done) {
-    	r = read(sp->diskfile_fd, sp->buffer, sp->test->settings->blksize -
+       r = read(sp->diskfile_fd, sp->buffer, sp->test->stream_bufsize -
     		 sp->diskfile_left);
         buffer_left += r;
     	rtot += r;
@@ -4469,7 +4530,7 @@ diskfile_send(struct iperf_stream *sp)
 
         // If the buffer doesn't contain a full buffer at this point,
         // adjust the size of the data to send.
-        if (buffer_left != sp->test->settings->blksize) {
+        if (buffer_left != sp->test->stream_bufsize) {
             if (sp->test->debug)
                 printf("possible eof\n");
             // setting data size to be sent,
@@ -4870,4 +4931,25 @@ int
 iflush(struct iperf_test *test)
 {
     return fflush(test->outfile);
+}
+
+static void
+init_batch_mode(struct iperf_test *test)
+{
+#if defined(ENABLE_BATCH_SEND) || defined(ENABLE_BATCH_RECV)
+    if (test->protocol->id == Pudp && test->zerocopy && test->diskfile_name == (char *)0) {
+        test->settings->batch = 1;
+        if (test->settings->burst == 0)
+            test->settings->burst = 1;
+#ifdef UIO_MAXIOV
+        else if (test->settings->burst > UIO_MAXIOV)
+            test->settings->burst = UIO_MAXIOV;
+#endif
+    }
+#endif // ENABLE_BATCH_SEND || ENABLE_BATCH_RECV
+
+    if (test->settings->batch == 0 || test->settings->burst == 0)
+        test->stream_bufsize = test->settings->blksize;
+    else
+        test->stream_bufsize = test->settings->blksize * test->settings->burst;
 }

@@ -808,6 +808,8 @@ enable_maintainer_mode
 enable_profiling
 with_sctp
 with_openssl
+enable_batch_send
+enable_batch_recv
 '
       ac_precious_vars='build_alias
 host_alias
@@ -1461,6 +1463,8 @@ Optional Features:
                           enable make rules and dependencies not useful (and
                           sometimes confusing) to the casual installer
   --enable-profiling      Enable iperf3 profiling binary
+  --enable-batch-send     Enable batch send [default=no]
+  --enable-batch-recv     Enable batch recv [default=no]
 
 Optional Packages:
   --with-PACKAGE[=ARG]    use PACKAGE [ARG=yes]
@@ -14745,6 +14749,79 @@ then :
 
 fi
 
+
+# Check for availability of sendmmsg/recvmmsg functions.
+
+  for ac_func in sendmmsg
+do :
+  ac_fn_c_check_func "$LINENO" "sendmmsg" "ac_cv_func_sendmmsg"
+if test "x$ac_cv_func_sendmmsg" = xyes
+then :
+  printf "%s\n" "#define HAVE_SENDMMSG 1" >>confdefs.h
+
+printf "%s\n" "#define HAVE_SENDMMSG 1" >>confdefs.h
+
+fi
+
+done
+
+
+  for ac_func in recvmmsg
+do :
+  ac_fn_c_check_func "$LINENO" "recvmmsg" "ac_cv_func_recvmmsg"
+if test "x$ac_cv_func_recvmmsg" = xyes
+then :
+  printf "%s\n" "#define HAVE_RECVMMSG 1" >>confdefs.h
+
+printf "%s\n" "#define HAVE_RECVMMSG 1" >>confdefs.h
+
+fi
+
+done
+
+# Check whether --enable-batch_send was given.
+if test ${enable_batch_send+y}
+then :
+  enableval=$enable_batch_send; case ${enableval} in #(
+  yes) :
+     ;; #(
+  no) :
+     ;; #(
+  *) :
+    as_fn_error $? "bad value ${enableval} for --enable-batch-send" "$LINENO" 5 ;;
+esac
+else $as_nop
+  enable_batch_send=no
+fi
+
+if test x$enable_batch_send = xyes
+then :
+
+printf "%s\n" "#define ENABLE_BATCH_SEND 1" >>confdefs.h
+
+fi
+
+# Check whether --enable-batch_recv was given.
+if test ${enable_batch_recv+y}
+then :
+  enableval=$enable_batch_recv; case ${enableval} in #(
+  yes) :
+     ;; #(
+  no) :
+     ;; #(
+  *) :
+    as_fn_error $? "bad value ${enableval} for --enable-batch-recv" "$LINENO" 5 ;;
+esac
+else $as_nop
+  enable_batch_recv=no
+fi
+
+if test x$enable_batch_recv = xyes
+then :
+
+printf "%s\n" "#define ENABLE_BATCH_RECV 1" >>confdefs.h
+
+fi
 
 # Check for packet pacing socket option (Linux only for now).
 { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking SO_MAX_PACING_RATE socket option" >&5

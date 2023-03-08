@@ -77,6 +77,13 @@
 typedef uint64_t iperf_size_t;
 #endif // __IPERF_API_H
 
+#if defined(ENABLE_BATCH_SEND) && !defined(HAVE_SENDMMSG)
+#error "sendmmsg is not available"
+#endif
+#if defined(ENABLE_BATCH_RECV) && !defined(HAVE_RECVMMSG)
+#error "recvmmsg is not available"
+#endif
+
 struct iperf_interval_results
 {
     iperf_size_t bytes_transferred; /* bytes transferred in this interval */
@@ -167,6 +174,7 @@ struct iperf_settings
     int       idle_timeout;         /* server idle time timeout */
     unsigned int snd_timeout; /* Timeout for sending tcp messages in active mode, in us */
     struct iperf_time rcv_timeout;  /* Timeout for receiving messages in active mode, in us */
+    int       batch;                /* batch mode (sendmmsg/recvmmsg) */
 };
 
 struct iperf_test;
@@ -209,6 +217,13 @@ struct iperf_stream
     int       cnt_error;
     int       omitted_cnt_error;
     uint64_t  target;
+
+#if defined(ENABLE_BATCH_SEND) || defined(ENABLE_BATCH_RECV)
+    struct mmsghdr *mmsg;
+    struct iovec   *mmsg_iov;
+    int            batch_packet_count;
+    char           *pbuf;
+#endif
 
     struct sockaddr_storage local_addr;
     struct sockaddr_storage remote_addr;
@@ -350,6 +365,7 @@ struct iperf_test
     double remote_cpu_util[3];                     /* cpu utilization for the remote host/client - total, user, system */
 
     int       num_streams;                      /* total streams in the test (-P) */
+    int       stream_bufsize;                   /* size of stream buffer */
 
     iperf_size_t bytes_sent;
     iperf_size_t blocks_sent;

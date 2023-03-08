@@ -24,6 +24,13 @@
  * This code is distributed under a BSD style license, see the LICENSE
  * file for complete information.
  */
+
+#include "iperf_config.h"
+
+#if defined(ENABLE_BATCH_SEND) || defined(ENABLE_BATCH_RECV)
+#define _GNU_SOURCE	/* required for sendmmg/recvmmsg */
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -70,13 +77,39 @@ iperf_udp_recv(struct iperf_stream *sp)
 {
     uint32_t  sec, usec;
     uint64_t  pcount;
-    int       r;
+    int       r, n, i;
     int       size = sp->settings->blksize;
     int       first_packet = 0;
     double    transit = 0, d = 0;
     struct iperf_time sent_time, arrival_time, temp_time;
+    char *pbuf;
 
-    r = Nread(sp->socket, sp->buffer, size, Pudp);
+#ifdef ENABLE_BATCH_RECV
+    struct timespec timeout;
+
+    if (sp->settings->batch == 1) {
+        timeout.tv_sec = sp->settings->rcv_timeout.secs;
+        timeout.tv_nsec = sp->settings->rcv_timeout.usecs;
+
+        // Receive at least one message
+        do {
+            n = recvmmsg(sp->socket, sp->mmsg, sp->settings->burst, MSG_WAITFORONE, &timeout);
+        } while (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK));
+
+        if (n <= 0) {
+            r = n;
+        } else {
+            for (i = 0, r = 0; i < n; i++) {
+                r += sp->mmsg[i].msg_hdr.msg_iov->iov_len;
+            }
+        }
+    }
+    else
+#endif // ENABLE_BATCH_RECV
+    {
+        r = Nread(sp->socket, sp->buffer, size, Pudp);
+        n = 1;
+    }
 
     /*
      * If we got an error in the read, or if we didn't read anything
@@ -100,11 +133,18 @@ iperf_udp_recv(struct iperf_stream *sp)
 	sp->result->bytes_received += r;
 	sp->result->bytes_received_this_interval += r;
 
+	for (i = 0; i < n; i++) {
+#ifdef ENABLE_BATCH_RECV
+            pbuf = sp->mmsg[i].msg_hdr.msg_iov->iov_base;
+#else
+            pbuf = sp->buffer;
+#endif
+
 	/* Dig the various counters out of the incoming UDP packet */
 	if (sp->test->udp_counters_64bit) {
-	    memcpy(&sec, sp->buffer, sizeof(sec));
-	    memcpy(&usec, sp->buffer+4, sizeof(usec));
-	    memcpy(&pcount, sp->buffer+8, sizeof(pcount));
+	    memcpy(&sec, pbuf, sizeof(sec));
+	    memcpy(&usec, pbuf+4, sizeof(usec));
+	    memcpy(&pcount, pbuf+8, sizeof(pcount));
 	    sec = ntohl(sec);
 	    usec = ntohl(usec);
 	    pcount = be64toh(pcount);
@@ -113,9 +153,9 @@ iperf_udp_recv(struct iperf_stream *sp)
 	}
 	else {
 	    uint32_t pc;
-	    memcpy(&sec, sp->buffer, sizeof(sec));
-	    memcpy(&usec, sp->buffer+4, sizeof(usec));
-	    memcpy(&pc, sp->buffer+8, sizeof(pc));
+	    memcpy(&sec, pbuf, sizeof(sec));
+	    memcpy(&usec, pbuf+4, sizeof(usec));
+	    memcpy(&pc, pbuf+8, sizeof(pc));
 	    sec = ntohl(sec);
 	    usec = ntohl(usec);
 	    pcount = ntohl(pc);
@@ -166,7 +206,7 @@ iperf_udp_recv(struct iperf_stream *sp)
 		sp->cnt_error--;
 
 	    /* Log the out-of-order packet */
-	    if (sp->test->debug)
+	    if (sp->test->debug_level >= DEBUG_LEVEL_DEBUG)
 		fprintf(stderr, "OUT OF ORDER - incoming packet sequence %" PRIu64 " but expected sequence %d on stream %d", pcount, sp->packet_count + 1, sp->socket);
 	}
 
@@ -187,17 +227,22 @@ iperf_udp_recv(struct iperf_stream *sp)
 	transit = iperf_time_in_secs(&temp_time);
 
 	/* Hack to handle the first packet by initializing prev_transit. */
-	if (first_packet)
+	if (first_packet) {
 	    sp->prev_transit = transit;
+	    first_packet = 0;
+	}
 
 	d = transit - sp->prev_transit;
 	if (d < 0)
 	    d = -d;
 	sp->prev_transit = transit;
 	sp->jitter += (d - sp->jitter) / 16.0;
+
+    } // for n received messages
+
     }
     else {
-	if (sp->test->debug)
+	if (sp->test->debug_level >= DEBUG_LEVEL_DEBUG)
 	    printf("Late receive, state = %d\n", sp->test->state);
     }
 
@@ -212,52 +257,108 @@ iperf_udp_recv(struct iperf_stream *sp)
 int
 iperf_udp_send(struct iperf_stream *sp)
 {
-    int r;
+    int r = 0;
     int       size = sp->settings->blksize;
     struct iperf_time before;
+    char *pbuf = sp->buffer;
+    uint32_t  sec, usec;
+#ifdef ENABLE_BATCH_SEND
+    int i, j, k;
+    char *b;
 
-    iperf_time_now(&before);
+    /* if sendmmsg is used - set buffer pointer to next buffer */
+    if (sp->settings->batch == 1) {
+        i = sp->batch_packet_count++;
+        sp->mmsg[i].msg_hdr.msg_iovlen = 1;
+        pbuf = sp->pbuf;
+        sp->mmsg[i].msg_hdr.msg_iov->iov_base = pbuf;
+        sp->pbuf += size;
+        sp->mmsg[i].msg_hdr.msg_iov->iov_len = size;
+    }
+#endif // ENABLE_BATCH_SEND
 
     ++sp->packet_count;
 
     if (sp->test->udp_counters_64bit) {
-
-	uint32_t  sec, usec;
 	uint64_t  pcount;
-
-	sec = htonl(before.secs);
-	usec = htonl(before.usecs);
-	pcount = htobe64(sp->packet_count);
-
-	memcpy(sp->buffer, &sec, sizeof(sec));
-	memcpy(sp->buffer+4, &usec, sizeof(usec));
-	memcpy(sp->buffer+8, &pcount, sizeof(pcount));
-
-    }
-    else {
-
-	uint32_t  sec, usec, pcount;
-
-	sec = htonl(before.secs);
-	usec = htonl(before.usecs);
-	pcount = htonl(sp->packet_count);
-
-	memcpy(sp->buffer, &sec, sizeof(sec));
-	memcpy(sp->buffer+4, &usec, sizeof(usec));
-	memcpy(sp->buffer+8, &pcount, sizeof(pcount));
-
+        pcount = htobe64(sp->packet_count);
+        memcpy(pbuf+8, &pcount, sizeof(pcount));
+    } else {
+        uint32_t  pcount;
+        pcount = htonl(sp->packet_count);
+        memcpy(pbuf+8, &pcount, sizeof(pcount));
     }
 
-    r = Nwrite(sp->socket, sp->buffer, size, Pudp);
+    /* Use sendmmsg when approriate to send the packet, else use Nwrite */
+#ifdef ENABLE_BATCH_SEND
+    if (sp->settings->batch == 1) {
+	/* When enough "burst" packets were buffered - send them */
+	if (sp->batch_packet_count >= sp->settings->burst) {
+            /* Set actual sending time to all packets*/
+            iperf_time_now(&before);
+            sec = htonl(before.secs);
+            usec = htonl(before.usecs);
+            for (i = 0; i < sp->batch_packet_count; i++) {
+                b = sp->mmsg[i].msg_hdr.msg_iov->iov_base;
+                memcpy(b, &sec, sizeof(sec));
+                memcpy(b+4, &usec, sizeof(usec));
+            }
 
-    if (r < 0)
+	        /* Sending messages and making sure all packets are sent */
+	        i = 0;	/* count of messages sent */
+	        r = 0;	/* total bytes sent */
+	        while (i < sp->batch_packet_count) {
+	            j = sendmmsg(sp->socket, &sp->mmsg[i], sp->batch_packet_count - i, MSG_DONTWAIT);
+		        if (j < 0) {
+		            r = j;
+		            break;
+		        }
+
+		        if (sp->test->debug_level >= DEBUG_LEVEL_DEBUG && i+j < sp->batch_packet_count)
+                            printf("sendmmsg() sent only %d messges out of %d still bufferred\n",
+		                   j, sp->batch_packet_count-i);
+
+                for (k = i; k < i+j; k++) { /* accumulate number of bytes sent */
+                    r += sp->mmsg[k].msg_len;
+                }
+                i += j; /* accumulate number of messages received */
+	        }
+
+	        if (sp->test->debug_level >= DEBUG_LEVEL_DEBUG)
+                    printf("sendmmsg() %s. Sent %d messges out of %d bufferred. %d bytes sent. (errno=%d: %s)\n",
+		           ((r > 0)? "succesful":"FAILED"), i, sp->batch_packet_count, r, errno, strerror(errno));
+
+	        sp->batch_packet_count = 0;
+            sp->pbuf = sp->buffer;
+	}
+    }
+    else
+#endif // ENABLE_BATCH_SEND
+    {
+        /* Set sending time */
+        iperf_time_now(&before);
+        sec = htonl(before.secs);
+        usec = htonl(before.usecs);
+        memcpy(pbuf, &sec, sizeof(sec));
+        memcpy(pbuf+4, &usec, sizeof(usec));
+
+        /* Write singe message */
+        r = Nwrite(sp->socket, pbuf, size, Pudp);
+    }
+
+    if (r < 0) {
+	if (sp->test->debug_level >= DEBUG_LEVEL_DEBUG)
+	    printf("Write failed with errno %d: %s\n", errno, strerror(errno));
 	return r;
+    }
 
     sp->result->bytes_sent += r;
     sp->result->bytes_sent_this_interval += r;
 
-    if (sp->test->debug_level >=  DEBUG_LEVEL_DEBUG)
-	printf("sent %d bytes of %d, total %" PRIu64 "\n", r, sp->settings->blksize, sp->result->bytes_sent);
+    if (sp->test->debug_level >=  DEBUG_LEVEL_DEBUG) {
+	if (sp->settings->batch == 0 || r > 0)
+	    printf("sent %d bytes of %d, total %" PRIu64 "\n", r, size, sp->result->bytes_sent);
+    }
 
     return r;
 }
@@ -309,18 +410,18 @@ iperf_udp_buffercheck(struct iperf_test *test, int s)
 	i_errno = IESETBUF;
 	return -1;
     }
-    if (test->debug) {
+    if (test->debug_level >= DEBUG_LEVEL_DEBUG) {
 	printf("SNDBUF is %u, expecting %u\n", sndbuf_actual, test->settings->socket_bufsize);
     }
     if (test->settings->socket_bufsize && test->settings->socket_bufsize > sndbuf_actual) {
 	i_errno = IESETBUF2;
 	return -1;
     }
-    if (test->settings->blksize > sndbuf_actual) {
+    if (test->stream_bufsize > sndbuf_actual) {
 	char str[WARN_STR_LEN];
 	snprintf(str, sizeof(str),
 		 "Block size %d > sending socket buffer size %d",
-		 test->settings->blksize, sndbuf_actual);
+		 test->stream_bufsize, sndbuf_actual);
 	warning(str);
 	rc = 1;
     }
@@ -331,7 +432,7 @@ iperf_udp_buffercheck(struct iperf_test *test, int s)
 	i_errno = IESETBUF;
 	return -1;
     }
-    if (test->debug) {
+    if (test->debug_level >= DEBUG_LEVEL_DEBUG) {
 	printf("RCVBUF is %u, expecting %u\n", rcvbuf_actual, test->settings->socket_bufsize);
     }
     if (test->settings->socket_bufsize && test->settings->socket_bufsize > rcvbuf_actual) {
@@ -404,7 +505,7 @@ iperf_udp_accept(struct iperf_test *test)
     if (rc > 0) {
 	if (test->settings->socket_bufsize == 0) {
             char str[WARN_STR_LEN];
-	    int bufsize = test->settings->blksize + UDP_BUFFER_EXTRA;
+	    int bufsize = test->stream_bufsize + UDP_BUFFER_EXTRA;
 	    snprintf(str, sizeof(str), "Increasing socket buffer size to %d",
 	             bufsize);
 	    warning(str);
@@ -421,7 +522,7 @@ iperf_udp_accept(struct iperf_test *test)
 	/* Convert bits per second to bytes per second */
 	unsigned int fqrate = test->settings->fqrate / 8;
 	if (fqrate > 0) {
-	    if (test->debug) {
+	    if (test->debug_level >= DEBUG_LEVEL_DEBUG) {
 		printf("Setting fair-queue socket pacing to %u\n", fqrate);
 	    }
 	    if (setsockopt(s, SOL_SOCKET, SO_MAX_PACING_RATE, &fqrate, sizeof(fqrate)) < 0) {
@@ -433,7 +534,7 @@ iperf_udp_accept(struct iperf_test *test)
     {
 	unsigned int rate = test->settings->rate / 8;
 	if (rate > 0) {
-	    if (test->debug) {
+	    if (test->debug_level >= DEBUG_LEVEL_DEBUG) {
 		printf("Setting application pacing to %u\n", rate);
 	    }
 	}
@@ -520,7 +621,7 @@ iperf_udp_connect(struct iperf_test *test)
     if (rc > 0) {
 	if (test->settings->socket_bufsize == 0) {
             char str[WARN_STR_LEN];
-	    int bufsize = test->settings->blksize + UDP_BUFFER_EXTRA;
+	    int bufsize = test->stream_bufsize + UDP_BUFFER_EXTRA;
 	    snprintf(str, sizeof(str), "Increasing socket buffer size to %d",
 	             bufsize);
 	    warning(str);
@@ -537,7 +638,7 @@ iperf_udp_connect(struct iperf_test *test)
 	/* Convert bits per second to bytes per second */
 	unsigned int fqrate = test->settings->fqrate / 8;
 	if (fqrate > 0) {
-	    if (test->debug) {
+	    if (test->debug_level >= DEBUG_LEVEL_DEBUG) {
 		printf("Setting fair-queue socket pacing to %u\n", fqrate);
 	    }
 	    if (setsockopt(s, SOL_SOCKET, SO_MAX_PACING_RATE, &fqrate, sizeof(fqrate)) < 0) {
@@ -549,7 +650,7 @@ iperf_udp_connect(struct iperf_test *test)
     {
 	unsigned int rate = test->settings->rate / 8;
 	if (rate > 0) {
-	    if (test->debug) {
+	    if (test->debug_level >= DEBUG_LEVEL_DEBUG) {
 		printf("Setting application pacing to %u\n", rate);
 	    }
 	}
@@ -570,7 +671,7 @@ iperf_udp_connect(struct iperf_test *test)
      * The server learns our address by obtaining its peer's address.
      */
     buf = UDP_CONNECT_MSG;
-    if (test->debug) {
+    if (test->debug_level >= DEBUG_LEVEL_DEBUG) {
         printf("Sending Connect message to Socket %d\n", s);
     }
     if (write(s, &buf, sizeof(buf)) < 0) {
@@ -591,7 +692,7 @@ iperf_udp_connect(struct iperf_test *test)
             i_errno = IESTREAMREAD;
             return -1;
         }
-        if (test->debug) {
+        if (test->debug_level >= DEBUG_LEVEL_DEBUG) {
             printf("Connect received for Socket %d, sz=%d, buf=%x, i=%d, max_len_wait_for_reply=%d\n", s, sz, buf, i, max_len_wait_for_reply);
         }
         i += sz;
